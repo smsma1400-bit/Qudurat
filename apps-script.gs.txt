@@ -1,0 +1,123 @@
+/**
+ * قاعدة بيانات موقع «تجميعات قدرات الورقي» — إعداد المعلمة مريم مانع العنزي
+ * يُلصق هذا الكود في: جدول Google ← الإضافات (Extensions) ← Apps Script
+ * ثم: نشر (Deploy) ← نشر جديد ← تطبيق ويب (Web app)
+ *      التنفيذ باسم: أنا (Me) — من يملك الوصول: أي شخص (Anyone)
+ */
+
+// بصمة مفتاح المعلمة (مشتقة من كلمة مرور صفحة المعلمة). لا تغيّريها إلا مع تغيير كلمة المرور في الموقع.
+const KEY_HASH = 'f9062c20c273eb6c5a6507af894896d709fbda9734dc3d741c073b74b9886cdc';
+
+const RES_SHEET = 'النتائج';
+const RES_HEAD  = ['المعرّف', 'الاسم', 'الفصل', 'عدد المحلولة', 'الإجابات الصحيحة', 'النسبة %', 'آخر تحديث', 'التفاصيل'];
+const EDIT_SHEET = 'تعديلات المعلمة';
+const EDIT_HEAD  = ['رقم السؤال', 'التعديل', 'آخر تحديث'];
+
+function sheet_(name, head) {
+  const ss = SpreadsheetApp.getActive();
+  let sh = ss.getSheetByName(name);
+  if (!sh) {
+    sh = ss.insertSheet(name);
+    sh.appendRow(head);
+    sh.setFrozenRows(1);
+    sh.setRightToLeft(true);
+    sh.getRange(1, 1, 1, head.length).setFontWeight('bold').setBackground('#ede9fe');
+  }
+  return sh;
+}
+function out_(o) {
+  return ContentService.createTextOutput(JSON.stringify(o)).setMimeType(ContentService.MimeType.JSON);
+}
+// يمنع تحويل النص إلى معادلة داخل الجدول
+function safe_(v, max) {
+  let s = String(v == null ? '' : v).slice(0, max || 80);
+  if (/^[=+\-@]/.test(s)) s = "'" + s;
+  return s;
+}
+function findRow_(sh, id) {
+  const last = sh.getLastRow();
+  if (last < 2) return 0;
+  const ids = sh.getRange(2, 1, last - 1, 1).getValues();
+  for (let i = 0; i < ids.length; i++) if (String(ids[i][0]) === String(id)) return i + 2;
+  return 0;
+}
+function isKey_(k) { return String(k || '') === KEY_HASH; }
+
+function doGet(e) {
+  const p = (e && e.parameter) || {};
+  try {
+    if (p.action === 'edits') {
+      const sh = sheet_(EDIT_SHEET, EDIT_HEAD), last = sh.getLastRow(), data = {};
+      if (last > 1) sh.getRange(2, 1, last - 1, 2).getValues().forEach(r => {
+        try { data[String(r[0])] = JSON.parse(r[1]); } catch (err) {}
+      });
+      return out_({ ok: true, data: data });
+    }
+    if (p.action === 'mine') {
+      const sh = sheet_(RES_SHEET, RES_HEAD), row = findRow_(sh, p.uid);
+      if (!row) return out_({ ok: true, data: null });
+      const r = sh.getRange(row, 1, 1, 8).getValues()[0];
+      let ans = {}; try { ans = JSON.parse(r[7]); } catch (err) {}
+      return out_({ ok: true, data: { name: r[1], cls: r[2], ans: ans } });
+    }
+    if (p.action === 'results') {
+      if (!isKey_(p.key)) return out_({ ok: false, error: 'key' });
+      const sh = sheet_(RES_SHEET, RES_HEAD), last = sh.getLastRow(), list = [];
+      if (last > 1) sh.getRange(2, 1, last - 1, 8).getValues().forEach(r => {
+        let ans = {}; try { ans = JSON.parse(r[7]); } catch (err) {}
+        const t = r[6] instanceof Date ? r[6].getTime() : Date.parse(r[6]) || 0;
+        list.push({ uid: String(r[0]), name: String(r[1]).replace(/^'/, ''), cls: String(r[2]).replace(/^'/, ''), ans: ans, upd: t });
+      });
+      return out_({ ok: true, data: list });
+    }
+    return out_({ ok: true, msg: 'qudurat-db' });
+  } catch (err) {
+    return out_({ ok: false, error: String(err) });
+  }
+}
+
+function doPost(e) {
+  let d;
+  try { d = JSON.parse(e.postData.contents); } catch (err) { return out_({ ok: false, error: 'json' }); }
+  const lock = LockService.getScriptLock();
+  lock.waitLock(20000);
+  try {
+    if (d.action === 'save') {
+      const uid = String(d.uid || '').slice(0, 64);
+      if (!/^[A-Za-z0-9_-]{8,64}$/.test(uid)) return out_({ ok: false, error: 'uid' });
+      const b = d.body || {};
+      const ans = {};
+      Object.keys(b.ans || {}).slice(0, 2000).forEach(k => {
+        const v = b.ans[k];
+        if (/^\d{1,6}$/.test(k) && Array.isArray(v)) ans[k] = [String(v[0]).slice(0, 4), v[1] ? 1 : 0];
+      });
+      let n = 0, c = 0; Object.keys(ans).forEach(k => { n++; if (ans[k][1]) c++; });
+      const row = [uid, safe_(b.name, 60), safe_(b.cls, 40), n, c, n ? Math.round(c / n * 100) : 0, new Date(), JSON.stringify(ans)];
+      const sh = sheet_(RES_SHEET, RES_HEAD), r = findRow_(sh, uid);
+      if (r) sh.getRange(r, 1, 1, 8).setValues([row]); else sh.appendRow(row);
+      return out_({ ok: true });
+    }
+    if (!isKey_(d.key)) return out_({ ok: false, error: 'key' });
+    if (d.action === 'delres') {
+      const sh = sheet_(RES_SHEET, RES_HEAD), r = findRow_(sh, d.uid);
+      if (r) sh.deleteRow(r);
+      return out_({ ok: true });
+    }
+    if (d.action === 'edit' || d.action === 'unedit') {
+      const p = String(d.p || '');
+      if (!/^\d{1,6}$/.test(p)) return out_({ ok: false, error: 'p' });
+      const sh = sheet_(EDIT_SHEET, EDIT_HEAD), r = findRow_(sh, p);
+      if (d.action === 'unedit') { if (r) sh.deleteRow(r); return out_({ ok: true }); }
+      const b = d.body || {}, clean = {};
+      if (Array.isArray(b.a)) clean.a = b.a.slice(0, 2).map(x => String(x).slice(0, 2));
+      if (typeof b.s === 'string') clean.s = b.s.slice(0, 5000);
+      if (b.hide) clean.hide = true;
+      const row = [p, JSON.stringify(clean), new Date()];
+      if (r) sh.getRange(r, 1, 1, 3).setValues([row]); else sh.appendRow(row);
+      return out_({ ok: true });
+    }
+    return out_({ ok: false, error: 'action' });
+  } finally {
+    lock.releaseLock();
+  }
+}
